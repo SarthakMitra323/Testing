@@ -1,0 +1,1329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>ConnectSphere</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>💬</text></svg>">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --app-height: 100vh;
+        }
+        body { 
+            font-family: 'Inter', sans-serif;
+            overflow: hidden;
+        }
+        .h-screen-dynamic {
+            height: var(--app-height);
+        }
+        .chat-bubble-sent { background-color: #dcf8c6; }
+        .chat-bubble-received { background-color: #ffffff; }
+        ::-webkit-scrollbar { width: 4px; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+        .md\:hidden { display: block; }
+        @media (min-width: 768px) {
+            .md\:hidden { display: none; }
+        }
+        .tick-seen { color: #3b82f6; } /* Blue color for seen ticks */
+        .tick-delivered { color: #6b7280; } /* Gray color for delivered ticks */
+        .message-container:hover .delete-btn { opacity: 1; }
+        .delete-btn { opacity: 0; transition: opacity 0.2s ease-in-out; }
+        .contact-item:hover .contact-actions { opacity: 1; }
+        .contact-actions { opacity: 0; transition: opacity 0.2s ease-in-out; }
+
+    </style>
+</head>
+<body class="bg-gray-100 text-gray-900">
+
+    <div id="app-container" class="h-screen-dynamic w-screen">
+        <!-- App content will be rendered here by JavaScript -->
+    </div>
+    
+    <input type="file" id="chat-image-upload" class="hidden" accept="image/*">
+
+    <!-- Firebase SDK -->
+    <script type="module">
+        // Firebase Imports
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { 
+            getAuth, 
+            onAuthStateChanged, 
+            createUserWithEmailAndPassword, 
+            signInWithEmailAndPassword, 
+            signOut,
+            updatePassword
+        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { 
+            getFirestore, 
+            doc, 
+            setDoc, 
+            getDoc, 
+            collection, 
+            addDoc, 
+            query, 
+            where, 
+            getDocs, 
+            onSnapshot,
+            updateDoc,
+            arrayUnion,
+            arrayRemove,
+            serverTimestamp,
+            orderBy,
+            writeBatch,
+            deleteDoc,
+            limit
+        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        
+        // --- GLOBAL STATE & CONFIG ---
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'connectsphere-app';
+        const firebaseConfig = {
+            apiKey: "AIzaSyD8Il1stHhvl_PgqwoN2-rKZQXut3B-qAY",
+            authDomain: "connectsphere-web.firebaseapp.com",
+            projectId: "connectsphere-web",
+            storageBucket: "connectsphere-web.firebasestorage.app",
+            messagingSenderId: "477654366755",
+            appId: "1:477654366755:web:1577289f86ea71c3734f96",
+            measurementId: "G-4YPV9Y5ZJQ"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+
+        let currentUser = null;
+        let currentUserData = null;
+        let currentChatId = null;
+        let currentContact = null; // Can be a user or a group
+        let unsubscribeUser = null;
+        let unsubscribeMessages = null;
+        let unsubscribeTypingStatus = null;
+        let typingTimeout = null;
+        let lastMessageDate = null;
+        let chatListeners = []; // Array to hold all chat listeners
+        let lastMessages = {}; // Object to store last message for each chat
+        const memberColors = {};
+        const colorPalette = ['#ef4444', '#f97316', '#84cc16', '#22c55e', '#14b8a6', '#06b6d4', '#6366f1', '#a855f7', '#d946ef', '#ec4899'];
+
+        const appContainer = document.getElementById('app-container');
+        
+        // --- DYNAMIC HEIGHT FOR MOBILE BROWSERS ---
+        const setAppHeight = () => {
+            const doc = document.documentElement;
+            doc.style.setProperty('--app-height', `${window.innerHeight}px`);
+        };
+        window.addEventListener('resize', setAppHeight);
+        setAppHeight();
+
+        // --- SECURITY & UTILS ---
+        function sanitizeHTML(str) {
+            if (!str) return '';
+            const temp = document.createElement('div');
+            temp.textContent = str;
+            return temp.innerHTML;
+        }
+
+        function requestNotificationPermission() {
+            if ('Notification' in window) {
+                if (Notification.permission !== 'granted' && Notification.permission !== 'denied') {
+                    Notification.requestPermission();
+                }
+            }
+        }
+
+        function showNotification(title, body, icon) {
+            if ('Notification' in window && Notification.permission === 'granted') {
+                new Notification(title, { body, icon });
+            }
+        }
+
+
+        // --- ROUTING ---
+        function navigate(page) {
+            // Clean up all listeners
+            if (unsubscribeUser) unsubscribeUser();
+            if (unsubscribeMessages) unsubscribeMessages();
+            if (unsubscribeTypingStatus) unsubscribeTypingStatus();
+            chatListeners.forEach(unsub => unsub());
+            chatListeners = [];
+            
+            appContainer.innerHTML = ''; 
+            switch(page) {
+                case 'loading': renderLoadingPage(); break;
+                case 'landing': renderLandingPage(); break;
+                case 'auth': renderAuthPage(); break;
+                case 'chat': renderChatPage(); break;
+                default: renderLandingPage();
+            }
+        }
+
+        // --- RENDER FUNCTIONS ---
+
+        function renderLoadingPage() {
+            appContainer.innerHTML = `
+                <div class="flex flex-col items-center justify-center h-full bg-gray-50">
+                    <svg class="h-12 w-auto text-indigo-600 mb-4 animate-pulse" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M8.625 12a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H8.25m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H12m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0h-.375M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                    <h1 class="text-2xl font-bold text-gray-900">ConnectSphere</h1>
+                    <p class="mt-2 text-gray-600">Connecting...</p>
+                </div>
+            `;
+        }
+
+        function renderLandingPage() {
+            appContainer.innerHTML = `
+                <div class="min-h-full bg-gray-50">
+                    <header class="absolute inset-x-0 top-0 z-50">
+                        <nav class="flex items-center justify-between p-6 lg:px-8" aria-label="Global">
+                            <div class="flex lg:flex-1">
+                                <a href="#" class="-m-1.5 p-1.5 flex items-center space-x-2">
+                                    <svg class="h-8 w-auto text-indigo-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M8.625 12a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H8.25m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H12m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0h-.375M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                                    <span class="text-xl font-bold text-gray-900">ConnectSphere</span>
+                                </a>
+                            </div>
+                            <div class="lg:flex lg:flex-1 lg:justify-end">
+                                <button id="login-btn" class="text-sm font-semibold leading-6 text-gray-900">Log in <span aria-hidden="true">&rarr;</span></button>
+                            </div>
+                        </nav>
+                    </header>
+                    <main class="relative isolate px-6 pt-14 lg:px-8">
+                        <div class="mx-auto max-w-2xl py-32 sm:py-48 lg:py-56">
+                            <div class="text-center">
+                                <h1 class="text-4xl font-bold tracking-tight text-gray-900 sm:text-6xl">Chatting, Redefined.</h1>
+                                <p class="mt-6 text-lg leading-8 text-gray-600">Experience a new era of messaging. Fast, secure, and designed for meaningful connections. Your conversations, your space.</p>
+                                <div class="mt-10 flex items-center justify-center gap-x-6">
+                                    <button id="get-started-btn" class="rounded-md bg-indigo-600 px-3.5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Get started</button>
+                                </div>
+                            </div>
+                        </div>
+                    </main>
+                </div>
+            `;
+            document.getElementById('login-btn').addEventListener('click', () => navigate('auth'));
+            document.getElementById('get-started-btn').addEventListener('click', () => navigate('auth'));
+        }
+
+        function renderAuthPage() {
+            appContainer.innerHTML = `
+                <div class="flex min-h-full items-center justify-center bg-gray-100 px-4">
+                    <div class="w-full max-w-md space-y-8">
+                        <div>
+                            <h2 id="auth-title" class="mt-6 text-center text-3xl font-bold tracking-tight text-gray-900">Create your account</h2>
+                            <p class="mt-2 text-center text-sm text-gray-600">
+                                Or <button id="switch-auth-mode" class="font-medium text-indigo-600 hover:text-indigo-500">sign in to your existing account</button>
+                            </p>
+                        </div>
+                        <form id="auth-form" class="mt-8 space-y-6" action="#" method="POST">
+                            <div class="space-y-4 rounded-md">
+                                <div id="username-field" class="relative">
+                                    <span class="absolute inset-y-0 left-0 flex items-center pl-3"><svg class="h-5 w-5 text-gray-400" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 9a3 3 0 100-6 3 3 0 000 6zm-7 9a7 7 0 1114 0H3z" clip-rule="evenodd" /></svg></span>
+                                    <input id="username" name="username" type="text" required class="relative block w-full appearance-none rounded-md border border-gray-300 px-3 py-2 pl-10 text-gray-900 placeholder-gray-500 focus:z-10 focus:border-indigo-500 focus:outline-none focus:ring-indigo-500 sm:text-sm" placeholder="Username">
+                                </div>
+                                <div class="relative">
+                                    <span class="absolute inset-y-0 left-0 flex items-center pl-3"><svg class="h-5 w-5 text-gray-400" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path d="M2.003 5.884L10 2l7.997 3.884A2 2 0 0019 7.616V16a2 2 0 01-2 2H3a2 2 0 01-2-2V7.616a2 2 0 001.003-1.732zM10 12a2 2 0 100-4 2 2 0 000 4z" /><path d="M10 15a5 5 0 100-10 5 5 0 000 10z" /></svg></span>
+                                    <input id="email-address" name="email" type="email" autocomplete="email" required class="relative block w-full appearance-none rounded-md border border-gray-300 px-3 py-2 pl-10 text-gray-900 placeholder-gray-500 focus:z-10 focus:border-indigo-500 focus:outline-none focus:ring-indigo-500 sm:text-sm" placeholder="Email address">
+                                </div>
+                                <div class="relative">
+                                    <span class="absolute inset-y-0 left-0 flex items-center pl-3"><svg class="h-5 w-5 text-gray-400" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 1a4.5 4.5 0 00-4.5 4.5V9H5a2 2 0 00-2 2v6a2 2 0 002 2h10a2 2 0 002-2v-6a2 2 0 00-2-2h-.5V5.5A4.5 4.5 0 0010 1zm3 8V5.5a3 3 0 10-6 0V9h6z" clip-rule="evenodd" /></svg></span>
+                                    <input id="password" name="password" type="password" autocomplete="current-password" required class="relative block w-full appearance-none rounded-md border border-gray-300 px-3 py-2 pl-10 text-gray-900 placeholder-gray-500 focus:z-10 focus:border-indigo-500 focus:outline-none focus:ring-indigo-500 sm:text-sm" placeholder="Password">
+                                </div>
+                            </div>
+                            <div>
+                                <button type="submit" id="auth-submit-btn" class="group relative flex w-full justify-center rounded-md border border-transparent bg-indigo-600 py-2 px-4 text-sm font-medium text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2">
+                                    Sign up
+                                </button>
+                            </div>
+                        </form>
+                        <p id="auth-error" class="mt-2 text-center text-sm text-red-600"></p>
+                    </div>
+                </div>
+            `;
+            setupAuthForm();
+        }
+
+        function renderChatPage() {
+            appContainer.innerHTML = `
+                <div class="h-full w-full flex bg-white relative">
+                    <!-- Left Panel (Contact List) -->
+                    <div id="contacts-panel" class="w-full md:w-1/3 lg:w-1/4 flex flex-col border-r border-gray-200 transition-transform duration-300 ease-in-out md:translate-x-0">
+                        <!-- User Profile Header -->
+                        <div class="p-3 sm:p-4 border-b border-gray-200 flex items-center justify-between flex-shrink-0">
+                            <div class="flex items-center overflow-hidden">
+                                <img id="user-profile-pic" src="https://placehold.co/40x40/E2E8F0/4A5568?text=U" class="w-10 h-10 rounded-full mr-3 object-cover flex-shrink-0">
+                                <div class="overflow-hidden">
+                                    <p id="user-username" class="font-semibold text-gray-900 truncate">Loading...</p>
+                                    <p class="text-xs text-gray-500">UID: <span id="user-uid">...</span></p>
+                                </div>
+                            </div>
+                            <div class="flex items-center space-x-1">
+                                <button id="create-group-btn" class="p-2 rounded-full hover:bg-gray-100">
+                                    <svg class="w-6 h-6 text-gray-500" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path d="M13 6a3 3 0 11-6 0 3 3 0 016 0zM18 8a2 2 0 11-4 0 2 2 0 014 0zM14 15a4 4 0 00-8 0v3h8v-3zM6 8a2 2 0 11-4 0 2 2 0 014 0zM16 18v-3a5.972 5.972 0 00-.75-2.906A3.005 3.005 0 0119 15v3h-3zM4.75 12.094A5.973 5.973 0 004 15v3H1v-3a3 3 0 013.75-2.906z" /></svg>
+                                </button>
+                                <button id="settings-btn" class="p-2 rounded-full hover:bg-gray-100">
+                                    <svg class="w-6 h-6 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="p-2 sm:p-4 border-b border-gray-200 flex-shrink-0">
+                           <div class="relative">
+                                <span class="absolute inset-y-0 left-0 flex items-center pl-3"><svg class="h-5 w-5 text-gray-400" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M8 4a4 4 0 100 8 4 4 0 000-8zM2 8a6 6 0 1110.89 3.476l4.817 4.817a1 1 0 01-1.414 1.414l-4.816-4.816A6 6 0 012 8z" clip-rule="evenodd" /></svg></span>
+                                <input id="search-contacts" type="text" placeholder="Search contacts..." class="w-full bg-gray-100 rounded-full py-2 pl-10 pr-4 focus:outline-none">
+                           </div>
+                        </div>
+                        <div class="p-2 sm:p-4 border-b border-gray-200 flex-shrink-0">
+                           <button id="add-contact-btn" class="w-full bg-indigo-600 text-white py-2 px-4 rounded-lg hover:bg-indigo-700 transition duration-200">Add Contact</button>
+                        </div>
+                        <div id="contacts-list" class="flex-grow overflow-y-auto"></div>
+                    </div>
+                    <!-- Right Panel (Chat) -->
+                    <div id="chat-panel" class="w-full md:w-2/3 lg:w-3/4 flex flex-col bg-gray-50 absolute md:relative top-0 left-0 h-full transition-transform duration-300 ease-in-out translate-x-full md:translate-x-0">
+                        <!-- Placeholder -->
+                        <div id="chat-placeholder" class="flex flex-col items-center justify-center h-full text-center p-4">
+                            <svg class="w-24 h-24 text-gray-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M8.625 12a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H8.25m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H12m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0h-.375M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                            <h2 class="mt-4 text-2xl font-semibold text-gray-800">Welcome to ConnectSphere</h2>
+                            <p class="text-gray-500">Select a contact to start chatting.</p>
+                        </div>
+                        <!-- Chat Area -->
+                        <div id="chat-area" class="hidden flex-col h-full">
+                            <!-- Chat Header -->
+                            <div class="p-3 sm:p-4 border-b border-gray-200 flex items-center bg-white flex-shrink-0">
+                                <button id="back-to-contacts-btn" class="md:hidden mr-2 p-2 rounded-full hover:bg-gray-200">
+                                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path></svg>
+                                </button>
+                                <img id="chat-contact-pic" src="https://placehold.co/40x40/E2E8F0/4A5568?text=C" class="w-10 h-10 rounded-full mr-3 object-cover">
+                                <div>
+                                    <p id="chat-contact-name" class="font-semibold text-gray-900">Contact Name</p>
+                                    <p id="typing-indicator" class="text-xs text-green-500 h-4"></p>
+                                </div>
+                            </div>
+                            <!-- Messages -->
+                            <div id="messages-container" class="flex-grow p-2 sm:p-4 overflow-y-auto space-y-2"></div>
+                            <!-- Message Input -->
+                            <div class="p-2 sm:p-4 bg-white border-t border-gray-200 flex-shrink-0">
+                                <form id="message-form" class="flex items-center space-x-2 sm:space-x-3">
+                                    <button type="button" id="attach-file-btn" class="p-2 rounded-full hover:bg-gray-200">
+                                        <svg class="w-6 h-6 text-gray-500" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z" clip-rule="evenodd" /></svg>
+                                    </button>
+                                    <input id="message-input" type="text" placeholder="Type a message..." class="flex-grow bg-gray-100 rounded-full py-2 px-4 focus:outline-none">
+                                    <button type="submit" id="send-btn" class="p-2 bg-indigo-300 text-white rounded-full cursor-not-allowed" disabled>
+                                        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"></path></svg>
+                                    </button>
+                                </form>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+            setupChatPage();
+        }
+
+        // --- MODALS ---
+        function showModal(title, content, onConfirm, confirmText = 'Confirm', cancelText = 'Cancel') {
+            const modalId = `modal-${Date.now()}`;
+            let buttonsHTML = `
+                <button id="confirm-btn" class="px-4 py-2 bg-indigo-600 text-white text-base font-medium rounded-md w-auto shadow-sm hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                    ${confirmText}
+                </button>
+                <button id="cancel-btn" class="px-4 py-2 bg-gray-200 text-gray-800 text-base font-medium rounded-md w-auto shadow-sm hover:bg-gray-300 focus:outline-none">${cancelText}</button>
+            `;
+            // Special case for delete modal
+            if (Array.isArray(onConfirm)) {
+                buttonsHTML = `
+                    <button id="delete-for-me-btn" class="px-4 py-2 bg-yellow-500 text-white text-base font-medium rounded-md w-auto shadow-sm hover:bg-yellow-600 focus:outline-none">${confirmText}</button>
+                    <button id="delete-for-everyone-btn" class="px-4 py-2 bg-red-600 text-white text-base font-medium rounded-md w-auto shadow-sm hover:bg-red-700 focus:outline-none">${cancelText}</button>
+                    <button id="cancel-delete-btn" class="px-4 py-2 bg-gray-200 text-gray-800 text-base font-medium rounded-md w-auto shadow-sm hover:bg-gray-300 focus:outline-none">Cancel</button>
+                `;
+            }
+
+            const modalHTML = `
+                <div id="${modalId}" class="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50 flex items-center justify-center px-4">
+                    <div class="relative mx-auto p-4 sm:p-5 border w-full max-w-md shadow-lg rounded-md bg-white">
+                        <div class="mt-3 text-center">
+                            <h3 class="text-lg leading-6 font-medium text-gray-900">${title}</h3>
+                            <div class="mt-2 px-4 sm:px-7 py-3">
+                                ${content}
+                            </div>
+                            <div id="modal-buttons" class="items-center px-4 py-3 space-x-2">
+                                ${buttonsHTML}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+            document.body.insertAdjacentHTML('beforeend', modalHTML);
+
+            const modalElement = document.getElementById(modalId);
+            const closeModal = () => modalElement.remove();
+
+            if (Array.isArray(onConfirm)) {
+                const [deleteForMeCb, deleteForEveryoneCb, showDeleteForEveryone] = onConfirm;
+                modalElement.querySelector('#delete-for-me-btn').addEventListener('click', () => { deleteForMeCb(); closeModal(); });
+                const deleteForEveryoneBtn = modalElement.querySelector('#delete-for-everyone-btn');
+                if (showDeleteForEveryone) {
+                    deleteForEveryoneBtn.addEventListener('click', () => { deleteForEveryoneCb(); closeModal(); });
+                } else {
+                    deleteForEveryoneBtn.style.display = 'none';
+                }
+                modalElement.querySelector('#cancel-delete-btn').addEventListener('click', closeModal);
+            } else {
+                modalElement.querySelector('#confirm-btn').addEventListener('click', async () => {
+                    const confirmBtn = modalElement.querySelector('#confirm-btn');
+                    confirmBtn.disabled = true;
+                    const success = await onConfirm();
+                    if (success) closeModal();
+                    confirmBtn.disabled = false;
+                });
+                modalElement.querySelector('#cancel-btn').addEventListener('click', closeModal);
+            }
+        }
+
+        // --- SETUP FUNCTIONS ---
+
+        function setupAuthForm() {
+            let isLoginMode = false;
+            const form = document.getElementById('auth-form');
+            const usernameField = document.getElementById('username-field');
+            const authTitle = document.getElementById('auth-title');
+            const switchBtn = document.getElementById('switch-auth-mode');
+            const submitBtn = document.getElementById('auth-submit-btn');
+            const errorP = document.getElementById('auth-error');
+
+            const toggleMode = () => {
+                isLoginMode = !isLoginMode;
+                usernameField.style.display = isLoginMode ? 'none' : 'block';
+                authTitle.textContent = isLoginMode ? 'Sign in to your account' : 'Create your account';
+                switchBtn.innerHTML = isLoginMode ? 'create a new account' : 'sign in to your existing account';
+                submitBtn.textContent = isLoginMode ? 'Sign in' : 'Sign up';
+                errorP.textContent = '';
+            };
+
+            switchBtn.addEventListener('click', toggleMode);
+
+            form.addEventListener('submit', async (e) => {
+                e.preventDefault();
+                submitBtn.disabled = true;
+                submitBtn.textContent = 'Processing...';
+                errorP.textContent = '';
+
+                const email = form.email.value;
+                const password = form.password.value;
+                
+                try {
+                    if (isLoginMode) {
+                        await signInWithEmailAndPassword(auth, email, password);
+                    } else {
+                        const username = form.username.value;
+                        if (!username) throw new Error("Username is required.");
+                        if (username.length > 20) throw new Error("Username must be 20 characters or less.");
+                        
+                        const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+                        const user = userCredential.user;
+                        const uid = await generateUniqueFiveDigitId();
+
+                        await setDoc(doc(db, "users", user.uid), {
+                            username: username,
+                            email: user.email,
+                            uid: uid,
+                            profilePictureUrl: '',
+                            contacts: [],
+                            unreadChats: []
+                        });
+                        
+                        await sendWelcomeMessage(user.uid);
+                    }
+                } catch (error) {
+                    switch (error.code) {
+                        case 'auth/email-already-in-use':
+                            errorP.textContent = 'This email address is already in use.';
+                            break;
+                        case 'auth/weak-password':
+                            errorP.textContent = 'Password should be at least 6 characters.';
+                            break;
+                        case 'auth/invalid-email':
+                             errorP.textContent = 'Please enter a valid email address.';
+                             break;
+                        case 'auth/user-not-found':
+                        case 'auth/wrong-password':
+                            errorP.textContent = 'Invalid email or password.';
+                            break;
+                        default:
+                            errorP.textContent = error.message || 'An unknown error occurred. Please try again.';
+                            console.error("Auth error:", error);
+                    }
+                } finally {
+                    submitBtn.disabled = false;
+                    submitBtn.textContent = isLoginMode ? 'Sign in' : 'Sign up';
+                }
+            });
+        }
+        
+        function setupChatPage() {
+            if (!currentUser) return;
+
+            const messageInput = document.getElementById('message-input');
+            const sendBtn = document.getElementById('send-btn');
+            
+            let currentContactsJson = ""; // To track changes in contacts
+
+            const userDocRef = doc(db, "users", currentUser.uid);
+            unsubscribeUser = onSnapshot(userDocRef, (doc) => {
+                if (doc.exists()) {
+                    currentUserData = { id: doc.id, ...doc.data() };
+                    updateUIWithUserData(currentUserData);
+
+                    const newContactsJson = JSON.stringify(currentUserData.contacts);
+                    if (newContactsJson !== currentContactsJson) {
+                        currentContactsJson = newContactsJson;
+                        listenForNewMessages(currentUserData.contacts);
+                    }
+
+                    // Enable form now that user data is loaded
+                    sendBtn.disabled = false;
+                    sendBtn.classList.remove('bg-indigo-300', 'cursor-not-allowed');
+                    sendBtn.classList.add('bg-indigo-600', 'hover:bg-indigo-700');
+                }
+            });
+
+            document.getElementById('settings-btn').addEventListener('click', openSettingsModal);
+            document.getElementById('create-group-btn').addEventListener('click', openCreateGroupModal);
+            document.getElementById('add-contact-btn').addEventListener('click', openAddContactModal);
+            document.getElementById('message-form').addEventListener('submit', handleSendMessage);
+            
+            const chatImageUpload = document.getElementById('chat-image-upload');
+            document.getElementById('attach-file-btn').addEventListener('click', () => {
+                if(currentChatId) {
+                    chatImageUpload.click();
+                } else {
+                    showModal('No Chat Selected', '<p class="text-sm text-gray-500">Please select a chat before sending an image.</p>', () => true, 'OK');
+                }
+            });
+            chatImageUpload.addEventListener('change', handleImageUploadAndSend);
+
+            document.getElementById('back-to-contacts-btn').addEventListener('click', closeChatOnMobile);
+            document.getElementById('search-contacts').addEventListener('input', (e) => {
+                renderContactsList(currentUserData.contacts, currentUserData.unreadChats || [], e.target.value);
+            });
+            
+            messageInput.addEventListener('input', handleTyping);
+        }
+        
+        // --- CORE LOGIC & HELPERS ---
+
+        function listenForNewMessages(contacts) {
+            // Clean up old listeners before creating new ones
+            chatListeners.forEach(unsub => unsub());
+            chatListeners = [];
+
+            contacts.forEach(contact => {
+                const chatId = contact.isGroup ? contact.groupId : getChatId(currentUser.uid, contact.userId);
+                const q = query(collection(db, 'chats', chatId, 'messages'), orderBy('timestamp', 'desc'), limit(1));
+                
+                const unsub = onSnapshot(q, (snapshot) => {
+                    if (!snapshot.empty) {
+                        const lastMsg = snapshot.docs[0].data();
+                        lastMessages[chatId] = lastMsg;
+                    } else {
+                        lastMessages[chatId] = null;
+                    }
+                    // Re-render the list whenever a last message is updated.
+                    if(currentUserData) { // Ensure user data is loaded
+                        renderContactsList(currentUserData.contacts, currentUserData.unreadChats || []);
+                    }
+                });
+                chatListeners.push(unsub);
+            });
+        }
+
+
+        async function handleTyping() {
+            if (!currentChatId || (currentContact && currentContact.isGroup)) return;
+            const chatDocRef = doc(db, 'chats', currentChatId);
+
+            await setDoc(chatDocRef, { typing: { [currentUser.uid]: true } }, { merge: true });
+            if (typingTimeout) clearTimeout(typingTimeout);
+            typingTimeout = setTimeout(async () => {
+                await setDoc(chatDocRef, { typing: { [currentUser.uid]: false } }, { merge: true });
+            }, 1500);
+        }
+
+        async function handleImageUploadAndSend(e) {
+            const file = e.target.files[0];
+            if (!file || !currentChatId) return;
+
+            e.target.value = null;
+
+            const tempId = `temp_${Date.now()}`;
+            renderMessage({ id: tempId, type: 'text', text: 'Uploading image...', senderId: currentUser.uid });
+
+            try {
+                const formData = new FormData();
+                formData.append('image', file);
+
+                const response = await fetch('https://api.imgur.com/3/image/', {
+                    method: 'POST',
+                    headers: { Authorization: 'Client-ID aca6d2502f5bfd8' },
+                    body: formData,
+                });
+                
+                document.getElementById(tempId)?.remove();
+                
+                if (!response.ok) throw new Error(`Network error: ${response.statusText}`);
+                const result = await response.json();
+
+                if (result.success) {
+                    await sendMessage(result.data.link, 'image');
+                } else {
+                    throw new Error(result.data.error || 'Unknown Imgur error');
+                }
+            } catch (error) {
+                console.error("Image send error:", error);
+                document.getElementById(tempId)?.remove();
+                renderMessage({
+                    id: `error_${Date.now()}`,
+                    type: 'text',
+                    text: '⚠️ Image failed to send. Please try again.',
+                    senderId: currentUser.uid,
+                });
+            }
+        }
+
+        async function generateUniqueFiveDigitId() {
+            let uid;
+            let isUnique = false;
+            while (!isUnique) {
+                uid = Math.floor(10000 + Math.random() * 90000).toString();
+                const q = query(collection(db, "users"), where("uid", "==", uid));
+                const querySnapshot = await getDocs(q);
+                if (querySnapshot.empty) isUnique = true;
+            }
+            return uid;
+        }
+
+        async function sendWelcomeMessage(userId) {
+            const botContact = { name: "ConnectSphere Bot", userId: "connectsphere_bot", profilePictureUrl: "https://placehold.co/40x40/93C5FD/1E40AF?text=B" };
+            const userDocRef = doc(db, "users", userId);
+            await updateDoc(userDocRef, { contacts: arrayUnion(botContact) });
+            const chatId = getChatId(userId, botContact.userId);
+            await addDoc(collection(db, "chats", chatId, "messages"), {
+                type: 'text',
+                text: "Welcome to ConnectSphere! Your unique UID is shown in the top left. Share it with friends to connect. You can add new contacts using their UID. Enjoy your stay!",
+                senderId: botContact.userId,
+                senderName: "ConnectSphere Bot",
+                timestamp: serverTimestamp(),
+                isRead: true,
+                deletedFor: []
+            });
+        }
+
+        function updateUIWithUserData(data) {
+            document.getElementById('user-username').textContent = sanitizeHTML(data.username);
+            document.getElementById('user-uid').textContent = sanitizeHTML(data.uid);
+            const profilePic = document.getElementById('user-profile-pic');
+            if (data.profilePictureUrl) {
+                profilePic.src = data.profilePictureUrl;
+            } else {
+                profilePic.src = `https://placehold.co/40x40/E2E8F0/4A5568?text=${sanitizeHTML(data.username.charAt(0).toUpperCase())}`;
+            }
+            renderContactsList(data.contacts, data.unreadChats || []);
+        }
+
+        function renderContactsList(contacts, unreadChats, searchTerm = '') {
+            const listElement = document.getElementById('contacts-list');
+            listElement.innerHTML = '';
+            
+            const filteredContacts = contacts.filter(contact => {
+                const name = contact.isGroup ? contact.groupName : contact.name;
+                return name.toLowerCase().includes(searchTerm.toLowerCase());
+            });
+
+            if (filteredContacts.length === 0) {
+                listElement.innerHTML = `<p class="p-4 text-center text-sm text-gray-500">No contacts found.</p>`;
+                return;
+            }
+
+            // Sort contacts to show unread ones first
+            filteredContacts.sort((a, b) => {
+                const aChatId = a.isGroup ? a.groupId : getChatId(currentUser.uid, a.userId);
+                const bChatId = b.isGroup ? b.groupId : getChatId(currentUser.uid, b.userId);
+                const aIsUnread = unreadChats.includes(aChatId);
+                const bIsUnread = unreadChats.includes(bChatId);
+                if (aIsUnread && !bIsUnread) return -1;
+                if (!aIsUnread && bIsUnread) return 1;
+                
+                const aLastMessage = lastMessages[aChatId];
+                const bLastMessage = lastMessages[bChatId];
+                if (aLastMessage && bLastMessage && aLastMessage.timestamp && bLastMessage.timestamp) {
+                    return bLastMessage.timestamp.toMillis() - aLastMessage.timestamp.toMillis();
+                }
+                return 0;
+            });
+            
+            filteredContacts.forEach(contact => {
+                const contactEl = document.createElement('div');
+                const isGroup = contact.isGroup;
+                const chatId = isGroup ? contact.groupId : getChatId(currentUser.uid, contact.userId);
+                const isUnread = unreadChats.includes(chatId);
+
+                contactEl.className = `contact-item flex items-center p-3 sm:p-4 hover:bg-gray-100 cursor-pointer border-b border-gray-200`;
+                
+                const picUrl = contact.profilePictureUrl || (isGroup 
+                    ? `https://placehold.co/40x40/A5B4FC/312E81?text=G`
+                    : `https://placehold.co/40x40/A5B4FC/312E81?text=${sanitizeHTML(contact.name.charAt(0).toUpperCase())}`);
+                const name = isGroup ? contact.groupName : contact.name;
+
+                let previewHTML = '';
+                const lastMessage = lastMessages[chatId];
+                if (lastMessage) {
+                    let prefix = '';
+                    if (lastMessage.senderId === currentUser.uid) {
+                        prefix = 'You: ';
+                    } else if (isGroup) {
+                        prefix = `${sanitizeHTML(lastMessage.senderName)}: `;
+                    }
+                    const content = lastMessage.type === 'image' ? 'Sent an image' : sanitizeHTML(lastMessage.text);
+                    previewHTML = `<p class="text-sm truncate ${isUnread ? 'font-bold text-gray-900' : 'text-gray-500'}">${prefix}${content}</p>`;
+                }
+
+                contactEl.innerHTML = `
+                    <img src="${picUrl}" class="w-10 h-10 rounded-full mr-3 object-cover">
+                    <div class="flex-grow overflow-hidden">
+                        <p class="font-semibold text-gray-900 truncate">${sanitizeHTML(name)}</p>
+                        ${previewHTML}
+                    </div>
+                    ${!isGroup ? `<div class="contact-actions hidden md:flex items-center space-x-1">
+                        <button class="edit-contact-btn p-2 rounded-full hover:bg-gray-200">
+                            <svg class="w-4 h-4 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.5L14.732 3.732z"></path></svg>
+                        </button>
+                        <button class="delete-contact-btn p-2 rounded-full hover:bg-gray-200">
+                             <svg class="w-4 h-4 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                        </button>
+                    </div>` : ''}
+                `;
+                contactEl.addEventListener('click', () => openChat(contact));
+                
+                let pressTimer;
+                contactEl.addEventListener('touchstart', (e) => {
+                    pressTimer = setTimeout(() => {
+                        openContactActionsModal(contact);
+                    }, 500);
+                });
+                contactEl.addEventListener('touchend', () => clearTimeout(pressTimer));
+                contactEl.addEventListener('touchmove', () => clearTimeout(pressTimer));
+                
+                if (!isGroup) {
+                    const editBtn = contactEl.querySelector('.edit-contact-btn');
+                    const deleteBtn = contactEl.querySelector('.delete-contact-btn');
+
+                    if(editBtn) {
+                        editBtn.addEventListener('click', (e) => {
+                            e.stopPropagation();
+                            openEditContactModal(contact);
+                        });
+                    }
+                    if(deleteBtn) {
+                        deleteBtn.addEventListener('click', (e) => {
+                            e.stopPropagation();
+                            openDeleteContactModal(contact);
+                        });
+                    }
+                }
+                listElement.appendChild(contactEl);
+            });
+        }
+
+        function getChatId(uid1, uid2) {
+            return [uid1, uid2].sort().join('_');
+        }
+
+        async function openChat(contact) {
+            currentContact = contact;
+            lastMessageDate = null; // Reset for new chat
+            document.getElementById('contacts-panel').classList.add('-translate-x-full');
+            document.getElementById('chat-panel').classList.remove('translate-x-full');
+
+            document.getElementById('chat-placeholder').classList.add('hidden');
+            const chatArea = document.getElementById('chat-area');
+            chatArea.classList.remove('hidden');
+            chatArea.classList.add('flex');
+            
+            const isGroup = contact.isGroup;
+            const name = isGroup ? contact.groupName : contact.name;
+            const picUrl = contact.profilePictureUrl || (isGroup 
+                    ? `https://placehold.co/40x40/A5B4FC/312E81?text=G`
+                    : `https://placehold.co/40x40/A5B4FC/312E81?text=${sanitizeHTML(contact.name.charAt(0).toUpperCase())}`);
+
+            document.getElementById('chat-contact-name').textContent = sanitizeHTML(name);
+            document.getElementById('chat-contact-pic').src = picUrl;
+
+            currentChatId = isGroup ? contact.groupId : getChatId(currentUser.uid, contact.userId);
+            
+            // Mark chat as read
+            const userDocRef = doc(db, "users", currentUser.uid);
+            await updateDoc(userDocRef, { unreadChats: arrayRemove(currentChatId) });
+
+            if (unsubscribeMessages) unsubscribeMessages();
+            if (unsubscribeTypingStatus) unsubscribeTypingStatus();
+
+            const messagesContainer = document.getElementById('messages-container');
+            messagesContainer.innerHTML = ''; 
+
+            const messagesQuery = query(collection(db, "chats", currentChatId, "messages"), orderBy("timestamp"));
+            unsubscribeMessages = onSnapshot(messagesQuery, (snapshot) => {
+                const allDocs = snapshot.docs;
+                messagesContainer.innerHTML = ''; // Clear and re-render all for simplicity with date dividers
+                lastMessageDate = null; // Reset for re-render
+                let unreadDividerPlaced = false;
+                
+                allDocs.forEach(doc => {
+                    const data = { id: doc.id, ...doc.data() };
+                    // Check if message is deleted for current user
+                    if (data.deletedFor && data.deletedFor.includes(currentUser.uid)) {
+                        return; // Skip rendering this message
+                    }
+
+                    if (!data.isRead && data.senderId !== currentUser.uid && !unreadDividerPlaced) {
+                        const divider = document.createElement('div');
+                        divider.className = 'text-center my-2';
+                        divider.innerHTML = `<span class="bg-indigo-100 text-indigo-700 text-xs font-semibold px-3 py-1 rounded-full">Unread Messages</span>`;
+                        messagesContainer.appendChild(divider);
+                        unreadDividerPlaced = true;
+                    }
+
+                    renderMessage(data);
+                });
+
+                if (!isGroup) markMessagesAsRead();
+                messagesContainer.scrollTop = messagesContainer.scrollHeight;
+            });
+
+            const typingIndicator = document.getElementById('typing-indicator');
+            if (isGroup) {
+                typingIndicator.textContent = '';
+            } else {
+                const chatDocRef = doc(db, 'chats', currentChatId);
+                unsubscribeTypingStatus = onSnapshot(chatDocRef, (doc) => {
+                    if (doc.exists() && doc.data().typing && doc.data().typing[contact.userId]) {
+                        typingIndicator.textContent = 'typing...';
+                    } else {
+                        typingIndicator.textContent = '';
+                    }
+                });
+            }
+        }
+
+        async function markMessagesAsRead() {
+            if (!currentChatId || !currentContact || currentContact.isGroup) return;
+
+            const unreadQuery = query(
+                collection(db, "chats", currentChatId, "messages"),
+                where('senderId', '==', currentContact.userId),
+                where('isRead', '==', false)
+            );
+
+            const unreadSnapshot = await getDocs(unreadQuery);
+            if (unreadSnapshot.empty) return;
+
+            const batch = writeBatch(db);
+            unreadSnapshot.forEach(doc => batch.update(doc.ref, { isRead: true }));
+            await batch.commit();
+        }
+
+        function closeChatOnMobile() {
+            document.getElementById('contacts-panel').classList.remove('-translate-x-full');
+            document.getElementById('chat-panel').classList.add('translate-x-full');
+            currentChatId = null;
+            currentContact = null;
+            if (unsubscribeMessages) unsubscribeMessages();
+            if (unsubscribeTypingStatus) unsubscribeTypingStatus();
+        }
+
+        function getFormattedDate(date) {
+            const today = new Date();
+            const yesterday = new Date(today);
+            yesterday.setDate(yesterday.getDate() - 1);
+
+            if (date.toDateString() === today.toDateString()) return 'Today';
+            if (date.toDateString() === yesterday.toDateString()) return 'Yesterday';
+            return date.toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' });
+        }
+        
+        function getMemberColor(userId) {
+            if (!memberColors[userId]) {
+                memberColors[userId] = colorPalette[Object.keys(memberColors).length % colorPalette.length];
+            }
+            return memberColors[userId];
+        }
+
+        function renderMessage(data) {
+            const messagesContainer = document.getElementById('messages-container');
+            
+            // --- Date Divider Logic ---
+            if (data.timestamp) {
+                const messageDate = data.timestamp.toDate();
+                if (!lastMessageDate || messageDate.toDateString() !== lastMessageDate.toDateString()) {
+                    const dateDivider = document.createElement('div');
+                    dateDivider.className = 'text-center my-2';
+                    dateDivider.innerHTML = `<span class="bg-gray-200 text-xs text-gray-500 px-2 py-1 rounded-full">${getFormattedDate(messageDate)}</span>`;
+                    messagesContainer.appendChild(dateDivider);
+                    lastMessageDate = messageDate;
+                }
+            }
+
+            let messageDiv = document.getElementById(data.id);
+            if (messageDiv) messageDiv.remove(); // Remove old one to re-render
+
+            const isSent = data.senderId === currentUser.uid;
+
+            messageDiv = document.createElement('div');
+            messageDiv.id = data.id;
+            messageDiv.className = `message-container flex items-end ${isSent ? 'justify-end' : 'justify-start'}`;
+
+            let contentHTML = '';
+            if (data.type === 'image' && data.imageUrl) {
+                contentHTML = `<a href="${data.imageUrl}" target="_blank" rel="noopener noreferrer"><img src="${data.imageUrl}" alt="Sent image" class="rounded-lg max-w-xs max-h-64 object-cover cursor-pointer"></a>`;
+            } else {
+                contentHTML = `<p class="text-sm text-black break-words">${sanitizeHTML(data.text || '')}</p>`;
+            }
+            
+            let timestampHTML = '';
+            if (data.timestamp) {
+                const time = new Date(data.timestamp.toDate()).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+                const ticks = isSent && !currentContact.isGroup ? `<span class="ticks ml-1 ${data.isRead ? 'tick-seen' : 'tick-delivered'}">${data.isRead ? '✓✓' : '✓'}</span>` : '';
+                timestampHTML = `<p class="text-xs text-right mt-1 text-gray-500 flex items-center justify-end">${time}${ticks}</p>`;
+            }
+            
+            const deleteButton = `<button class="delete-btn p-1" onclick="window.showDeleteOptions('${data.id}', '${data.senderId}')"><svg class="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button>`;
+            
+            const senderNameHTML = (currentContact.isGroup && !isSent) 
+                ? `<p class="text-xs font-bold mb-1" style="color: ${getMemberColor(data.senderId)}">${sanitizeHTML(data.senderName || 'Unknown User')}</p>` 
+                : '';
+
+            messageDiv.innerHTML = `
+                ${isSent ? deleteButton : ''}
+                <div class="flex flex-col ${isSent ? 'items-end' : 'items-start'}">
+                    ${senderNameHTML}
+                    <div class="max-w-[80%] sm:max-w-xs lg:max-w-md px-3 py-2 rounded-xl ${isSent ? 'chat-bubble-sent' : 'chat-bubble-received'}">
+                        ${contentHTML}
+                        ${timestampHTML}
+                    </div>
+                </div>
+                ${!isSent ? deleteButton : ''}
+            `;
+            
+            // Add long-press event listener for mobile delete
+            let pressTimer;
+            messageDiv.addEventListener('touchstart', (e) => {
+                pressTimer = setTimeout(() => {
+                    window.showDeleteOptions(data.id, data.senderId);
+                }, 500); // 500ms for a long press
+            });
+            messageDiv.addEventListener('touchend', () => clearTimeout(pressTimer));
+            messageDiv.addEventListener('touchmove', () => clearTimeout(pressTimer));
+
+            messagesContainer.appendChild(messageDiv);
+            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        }
+
+        window.showDeleteOptions = (messageId, senderId) => {
+            const isMyMessage = senderId === currentUser.uid;
+            const deleteForMe = async () => {
+                const messageRef = doc(db, "chats", currentChatId, "messages", messageId);
+                await updateDoc(messageRef, {
+                    deletedFor: arrayUnion(currentUser.uid)
+                });
+            };
+            const deleteForEveryone = async () => {
+                await deleteDoc(doc(db, "chats", currentChatId, "messages", messageId));
+            };
+
+            showModal(
+                'Delete Message',
+                '<p class="text-sm text-gray-500">Choose an option:</p>',
+                [deleteForMe, deleteForEveryone, isMyMessage],
+                'Delete for me',
+                'Delete for everyone'
+            );
+        };
+        
+        async function sendMessage(content, type = 'text') {
+            if (!content || !currentChatId) return;
+
+            const messageData = {
+                type: type,
+                senderId: currentUser.uid,
+                senderName: currentUserData.username,
+                timestamp: serverTimestamp(),
+                isRead: false,
+                deletedFor: []
+            };
+
+            if (type === 'text') {
+                messageData.text = content;
+            } else if (type === 'image') {
+                messageData.imageUrl = content;
+            }
+
+            const chatDocRef = doc(db, 'chats', currentChatId);
+            const chatDoc = await getDoc(chatDocRef);
+            
+            let members = [];
+            if (chatDoc.exists()) {
+                members = chatDoc.data().members || [];
+            } else if (currentContact && !currentContact.isGroup) {
+                members = [currentUser.uid, currentContact.userId];
+                await setDoc(chatDocRef, { members: members, isGroup: false });
+            }
+
+            await addDoc(collection(chatDocRef, "messages"), messageData);
+
+            const recipients = members.filter(id => id !== currentUser.uid);
+            if (recipients.length > 0) {
+                const batch = writeBatch(db);
+                recipients.forEach(userId => {
+                    const userRef = doc(db, 'users', userId);
+                    batch.update(userRef, { unreadChats: arrayUnion(currentChatId) });
+                });
+                await batch.commit();
+            }
+        }
+
+        async function handleSendMessage(e) {
+            e.preventDefault();
+            const input = document.getElementById('message-input');
+            const text = input.value.trim();
+            if (text) {
+                input.value = '';
+                await sendMessage(text, 'text');
+            }
+        }
+
+        // --- MODAL HANDLERS ---
+        function openContactActionsModal(contact) {
+            const content = `
+                <div class="flex flex-col space-y-2">
+                    <button id="edit-contact-action" class="text-left w-full p-2 rounded-md hover:bg-gray-100">Edit Contact</button>
+                    <button id="delete-contact-action" class="text-left w-full p-2 rounded-md hover:bg-gray-100 text-red-600">Delete (Block) Contact</button>
+                </div>
+            `;
+            const modal = showModal(`Actions for ${contact.name}`, content, () => true, 'Close', 'Close');
+            
+            document.getElementById('edit-contact-action').addEventListener('click', () => {
+                document.querySelector('.fixed.inset-0').remove(); // Close current modal
+                openEditContactModal(contact);
+            });
+            document.getElementById('delete-contact-action').addEventListener('click', () => {
+                document.querySelector('.fixed.inset-0').remove(); // Close current modal
+                openDeleteContactModal(contact);
+            });
+        }
+
+        function openDeleteContactModal(contact) {
+             showModal(
+                `Delete ${contact.name}?`,
+                `<p class="text-sm text-gray-500">This will remove the contact for both of you and cannot be undone.</p>`,
+                async () => {
+                    try {
+                        const contactUserRef = doc(db, "users", contact.userId);
+                        const currentUserRef = doc(db, "users", currentUser.uid);
+
+                        const contactToRemoveFromCurrentUser = currentUserData.contacts.find(c => c.userId === contact.userId);
+                        
+                        const contactUserDoc = await getDoc(contactUserRef);
+                        const contactUserData = contactUserDoc.data();
+                        const currentUserToRemoveFromContact = contactUserData.contacts.find(c => c.userId === currentUser.uid);
+
+                        const batch = writeBatch(db);
+                        batch.update(currentUserRef, { contacts: arrayRemove(contactToRemoveFromCurrentUser) });
+                        if(currentUserToRemoveFromContact) {
+                            batch.update(contactUserRef, { contacts: arrayRemove(currentUserToRemoveFromContact) });
+                        }
+                        await batch.commit();
+                        return true;
+                    } catch (error) {
+                        console.error("Error deleting contact:", error);
+                        return false;
+                    }
+                },
+                'Delete',
+                'Cancel'
+            );
+        }
+
+        function openAddContactModal() {
+            const content = `
+                <p class="text-sm text-gray-500 mb-4">Enter the 5-digit UID and a name for your new contact.</p>
+                <input id="contact-uid-input" type="text" placeholder="Contact's UID" class="mb-2 w-full px-3 py-2 border rounded-md">
+                <input id="contact-name-input" type="text" placeholder="Contact's Name" class="w-full px-3 py-2 border rounded-md">
+                <p id="add-contact-error" class="text-red-500 text-sm mt-2"></p>
+            `;
+            showModal('Add New Contact', content, async () => {
+                const uid = document.getElementById('contact-uid-input').value;
+                const name = document.getElementById('contact-name-input').value;
+                const errorP = document.getElementById('add-contact-error');
+                errorP.textContent = '';
+
+                if (!uid || !name) {
+                    errorP.textContent = 'Both UID and Name are required.';
+                    return false;
+                }
+                if (uid === currentUserData.uid) {
+                    errorP.textContent = "You can't add yourself as a contact.";
+                    return false;
+                }
+
+                try {
+                    const q = query(collection(db, "users"), where("uid", "==", uid));
+                    const querySnapshot = await getDocs(q);
+                    
+                    if (querySnapshot.empty) {
+                        errorP.textContent = 'User with this UID not found.';
+                        return false;
+                    }
+                    
+                    const contactUserDoc = querySnapshot.docs[0];
+                    const contactUserData = contactUserDoc.data();
+
+                    if (currentUserData.contacts.some(c => c.userId === contactUserDoc.id)) {
+                        errorP.textContent = 'This user is already in your contacts.';
+                        return false;
+                    }
+
+                    // Data for the new contact to be added to the current user's list
+                    const newContactForCurrentUser = { 
+                        userId: contactUserDoc.id, 
+                        name: name, // The name the current user gives them
+                        profilePictureUrl: contactUserData.profilePictureUrl || '' 
+                    };
+
+                    // Data for the current user to be added to the new contact's list
+                    const currentUserForNewContact = {
+                        userId: currentUser.uid,
+                        name: currentUserData.username, // The new contact will see the current user's actual username
+                        profilePictureUrl: currentUserData.profilePictureUrl || ''
+                    };
+
+                    // Use a batch to update both documents at once
+                    const batch = writeBatch(db);
+
+                    const currentUserRef = doc(db, "users", currentUser.uid);
+                    batch.update(currentUserRef, { contacts: arrayUnion(newContactForCurrentUser) });
+
+                    const newContactRef = doc(db, "users", contactUserDoc.id);
+                    batch.update(newContactRef, { contacts: arrayUnion(currentUserForNewContact) });
+
+                    await batch.commit();
+                    return true;
+                } catch (error) {
+                    errorP.textContent = 'Error adding contact. Please try again.';
+                    console.error("Add contact error:", error);
+                    return false;
+                }
+            }, 'Add Contact');
+        }
+
+        function openEditContactModal(contact) {
+            const content = `
+                <p class="text-sm text-gray-500 mb-4">Edit the name for this contact.</p>
+                <input id="edit-contact-name-input" type="text" value="${contact.name}" class="w-full px-3 py-2 border rounded-md">
+                <p id="edit-contact-error" class="text-red-500 text-sm mt-2"></p>
+            `;
+            showModal('Edit Contact Name', content, async () => {
+                const newName = document.getElementById('edit-contact-name-input').value;
+                if (!newName) {
+                    document.getElementById('edit-contact-error').textContent = 'Name cannot be empty.';
+                    return false;
+                }
+                
+                const updatedContacts = currentUserData.contacts.map(c => c.userId === contact.userId ? { ...c, name: newName } : c);
+                try {
+                    await updateDoc(doc(db, "users", currentUser.uid), { contacts: updatedContacts });
+                    return true;
+                } catch(error) {
+                    document.getElementById('edit-contact-error').textContent = "Failed to update name.";
+                    return false;
+                }
+            }, 'Save Changes');
+        }
+        
+        function openCreateGroupModal() {
+            const individualContacts = currentUserData.contacts.filter(c => !c.isGroup && c.userId !== 'connectsphere_bot');
+            
+            if (individualContacts.length === 0) {
+                 showModal('No Contacts', '<p class="text-sm text-gray-500">You need to add contacts before you can create a group.</p>', () => true, 'OK');
+                 return;
+            }
+
+            let contactsHTML = individualContacts.map(contact => `
+                <label class="flex items-center space-x-3 p-2 rounded-md hover:bg-gray-100">
+                    <input type="checkbox" data-id="${contact.userId}" class="form-checkbox h-5 w-5 text-indigo-600 rounded">
+                    <img src="${contact.profilePictureUrl || `https://placehold.co/40x40/A5B4FC/312E81?text=${contact.name.charAt(0).toUpperCase()}`}" class="w-8 h-8 rounded-full object-cover">
+                    <span class="text-gray-700">${contact.name}</span>
+                </label>
+            `).join('');
+
+            const content = `
+                <div class="space-y-4 text-left">
+                    <input id="group-name-input" type="text" placeholder="Group Name" class="w-full px-3 py-2 border rounded-md">
+                    <p class="font-medium text-gray-700">Select Members:</p>
+                    <div class="max-h-48 overflow-y-auto border rounded-md p-2">
+                        ${contactsHTML}
+                    </div>
+                     <p id="create-group-error" class="text-red-500 text-sm"></p>
+                </div>
+            `;
+
+            showModal('Create New Group', content, async () => {
+                const groupName = document.getElementById('group-name-input').value.trim();
+                const errorP = document.getElementById('create-group-error');
+                if (!groupName) {
+                    errorP.textContent = 'Group name is required.';
+                    return false;
+                }
+
+                const selectedMembers = Array.from(document.querySelectorAll('input[type="checkbox"]:checked'))
+                                             .map(cb => cb.dataset.id);
+
+                if (selectedMembers.length < 1) {
+                    errorP.textContent = 'You must select at least one member.';
+                    return false;
+                }
+                
+                const allMemberIds = [...new Set([currentUser.uid, ...selectedMembers])];
+
+                try {
+                    const groupDocRef = await addDoc(collection(db, 'chats'), { // Use 'chats' collection for groups too
+                        groupName,
+                        members: allMemberIds,
+                        createdBy: currentUser.uid,
+                        createdAt: serverTimestamp(),
+                        isGroup: true,
+                        profilePictureUrl: ''
+                    });
+
+                    const newGroupContact = {
+                        isGroup: true,
+                        groupId: groupDocRef.id,
+                        groupName: groupName,
+                        profilePictureUrl: ''
+                    };
+
+                    const batch = writeBatch(db);
+                    allMemberIds.forEach(userId => {
+                        const userDocRef = doc(db, 'users', userId);
+                        batch.update(userDocRef, { contacts: arrayUnion(newGroupContact) });
+                    });
+                    await batch.commit();
+                    
+                    return true;
+                } catch (error) {
+                    console.error("Group creation failed:", error);
+                    errorP.textContent = 'Failed to create group.';
+                    return false;
+                }
+            }, 'Create Group');
+        }
+
+        function openSettingsModal() {
+            const content = `
+                <div class="space-y-4 text-left">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Profile Picture</label>
+                        <div class="mt-1 flex items-center space-x-4">
+                            <img id="settings-profile-pic-preview" src="${currentUserData.profilePictureUrl || `https://placehold.co/64x64/E2E8F0/4A5568?text=${currentUserData.username.charAt(0).toUpperCase()}`}" class="w-16 h-16 rounded-full object-cover">
+                            <input type="file" id="profile-pic-upload" accept="image/*" class="hidden">
+                            <button onclick="document.getElementById('profile-pic-upload').click()" class="px-3 py-2 border border-gray-300 rounded-md text-sm font-medium hover:bg-gray-50">Change</button>
+                        </div>
+                    </div>
+                    <div class="relative">
+                         <label for="settings-username" class="block text-sm font-medium text-gray-700">Username</label>
+                         <span class="absolute top-8 left-0 flex items-center pl-3"><svg class="h-5 w-5 text-gray-400" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 9a3 3 0 100-6 3 3 0 000 6zm-7 9a7 7 0 1114 0H3z" clip-rule="evenodd" /></svg></span>
+                         <input type="text" id="settings-username" value="${currentUserData.username}" class="mt-1 block w-full px-3 py-2 pl-10 border rounded-md">
+                    </div>
+                    <div class="relative">
+                        <label for="settings-password" class="block text-sm font-medium text-gray-700">New Password</label>
+                        <span class="absolute top-8 left-0 flex items-center pl-3"><svg class="h-5 w-5 text-gray-400" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 1a4.5 4.5 0 00-4.5 4.5V9H5a2 2 0 00-2 2v6a2 2 0 002 2h10a2 2 0 002-2v-6a2 2 0 00-2-2h-.5V5.5A4.5 4.5 0 0010 1zm3 8V5.5a3 3 0 10-6 0V9h6z" clip-rule="evenodd" /></svg></span>
+                        <input type="password" id="settings-password" placeholder="Leave blank to keep current" class="mt-1 block w-full px-3 py-2 pl-10 border rounded-md">
+                    </div>
+                    <p id="settings-error" class="text-red-500 text-sm"></p>
+                    <hr>
+                    <button id="logout-btn" class="w-full text-left px-3 py-2 rounded-md text-red-600 hover:bg-red-50">Log Out</button>
+                </div>
+            `;
+            showModal('Settings', content, async () => {
+                const errorP = document.getElementById('settings-error');
+                errorP.textContent = '';
+                try {
+                    const userDocRef = doc(db, "users", currentUser.uid);
+                    
+                    const newUsername = document.getElementById('settings-username').value;
+                    if (newUsername !== currentUserData.username) {
+                        await updateDoc(userDocRef, { username: newUsername });
+                    }
+
+                    const newPassword = document.getElementById('settings-password').value;
+                    if (newPassword) {
+                        await updatePassword(currentUser, newPassword);
+                    }
+
+                    const fileInput = document.getElementById('profile-pic-upload');
+                    const file = fileInput.files[0];
+                    if (file) {
+                        errorP.textContent = 'Uploading image...';
+                        const formData = new FormData();
+                        formData.append('image', file);
+                        const response = await fetch('https://api.imgur.com/3/image/', {
+                            method: 'POST',
+                            headers: { Authorization: 'Client-ID aca6d2502f5bfd8' },
+                            body: formData,
+                        });
+                        
+                        if (!response.ok) throw new Error(`Network error: ${response.statusText}`);
+                        const result = await response.json();
+
+                        if (result.success) {
+                            await updateDoc(userDocRef, { profilePictureUrl: result.data.link });
+                        } else {
+                            throw new Error('Imgur upload failed: ' + (result.data.error || 'Unknown error'));
+                        }
+                    }
+                    return true; // Success
+                } catch (error) {
+                    errorP.textContent = "Update failed. This could be a network issue. Please try again.";
+                    console.error("Settings update error:", error);
+                    return false; // Failure
+                }
+            }, 'Save Changes');
+
+            document.getElementById('logout-btn').addEventListener('click', async () => {
+                await signOut(auth);
+                document.querySelector('.fixed.inset-0').remove();
+            });
+
+            document.getElementById('profile-pic-upload').addEventListener('change', (e) => {
+                const file = e.target.files[0];
+                if (file) {
+                    const reader = new FileReader();
+                    reader.onload = (event) => { document.getElementById('settings-profile-pic-preview').src = event.target.result; };
+                    reader.readAsDataURL(file);
+                }
+            });
+        }
+
+        // --- INITIALIZATION ---
+        onAuthStateChanged(auth, (user) => {
+            if (user) {
+                currentUser = user;
+                navigate('chat');
+            } else {
+                currentUser = null;
+                currentUserData = null;
+                navigate('landing');
+            }
+        });
+        
+        // Initial load
+        navigate('loading');
+
+    </script>
+</body>
+</html>
