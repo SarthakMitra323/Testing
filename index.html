@@ -54,6 +54,21 @@
 </head>
 <body class="bg-gray-100 text-gray-900">
 
+    <script>
+        // Disable right-click
+        document.addEventListener('contextmenu', function(e) {
+            e.preventDefault();
+        });
+        // Disable common dev tools shortcuts
+        document.addEventListener('keydown', function(e) {
+            // F12
+            if (e.key === 'F12') e.preventDefault();
+            // Ctrl+Shift+I, Ctrl+Shift+J, Ctrl+Shift+C
+            if (e.ctrlKey && e.shiftKey && (e.key === 'I' || e.key === 'J' || e.key === 'C')) e.preventDefault();
+            // Ctrl+U, Ctrl+S
+            if (e.ctrlKey && (e.key === 'u' || e.key === 's' || e.key === 'U' || e.key === 'S')) e.preventDefault();
+        });
+    </script>
     <div id="app-container" class="h-screen-dynamic w-screen">
         <!-- App content will be rendered here by JavaScript -->
     </div>
@@ -321,6 +336,24 @@
                                     <span class="absolute inset-y-0 left-0 flex items-center pl-3"><svg class="h-5 w-5 text-gray-400" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 1a4.5 4.5 0 00-4.5 4.5V9H5a2 2 0 00-2 2v6a2 2 0 002 2h10a2 2 0 002-2v-6a2 2 0 00-2-2h-.5V5.5A4.5 4.5 0 0010 1zm3 8V5.5a3 3 0 10-6 0V9h6z" clip-rule="evenodd" /></svg></span>
                                     <input id="password" name="password" type="password" autocomplete="current-password" required class="relative block w-full appearance-none rounded-md border border-gray-300 px-3 py-2 pl-10 text-gray-900 placeholder-gray-500 focus:z-10 focus:border-indigo-500 focus:outline-none focus:ring-indigo-500 sm:text-sm" placeholder="Password">
                                 </div>
+                                <div id="terms-div">
+                                    <div class="mt-4 p-3 border rounded bg-gray-50 text-left text-xs">
+                                        <button type="button" id="terms-toggle" class="w-full text-left font-bold mb-2 flex items-center justify-between">
+                                            <span>Terms & Conditions and Privacy Policy</span>
+                                            <svg id="terms-arrow" class="w-4 h-4 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" /></svg>
+                                        </button>
+                                        <div id="terms-content" style="display:none;">
+                                            <h3 class="font-bold mb-2">Terms & Conditions</h3>
+                                            <p class="mb-2">By creating an account, you agree to abide by the rules of ConnectSphere. You will not use the service for illegal activities, harassment, or spamming. You understand that your data may be stored securely and used to provide the service. We are not responsible for user-generated content. The creator of this website is Sarthak Mitra.</p>
+                                            <h3 class="font-bold mb-2">Privacy Policy</h3>
+                                            <p class="mb-2">Your email, username, and profile picture are stored securely and are only visible to your contacts. We do not sell your data to third parties. You may request deletion of your account at any time.</p>
+                                        </div>
+                                        <label class="flex items-center mt-2">
+                                            <input type="checkbox" id="terms-checkbox" class="mr-2" required>
+                                            <span>I agree to the Terms & Conditions and Privacy Policy</span>
+                                        </label>
+                                    </div>
+                                </div>
                             </div>
                             <div>
                                 <button type="submit" id="auth-submit-btn" class="group relative flex w-full justify-center rounded-md border border-transparent bg-indigo-600 py-2 px-4 text-sm font-medium text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2">
@@ -333,6 +366,17 @@
                 </div>
             `;
             setupAuthForm();
+            // Dropdown logic for terms
+            const termsToggle = document.getElementById('terms-toggle');
+            const termsContent = document.getElementById('terms-content');
+            const termsArrow = document.getElementById('terms-arrow');
+            if (termsToggle && termsContent && termsArrow) {
+                termsToggle.addEventListener('click', () => {
+                    const isOpen = termsContent.style.display !== 'none';
+                    termsContent.style.display = isOpen ? 'none' : 'block';
+                    termsArrow.style.transform = isOpen ? '' : 'rotate(180deg)';
+                });
+            }
         }
 
         function renderChatPage() {
@@ -504,8 +548,15 @@
                 submitBtn.textContent = 'Processing...';
                 errorP.textContent = '';
 
-                const email = form.email.value;
-                const password = form.password.value;
+                // Use correct field IDs for email and password
+                const email = form['email-address'] ? form['email-address'].value.trim() : '';
+                const password = form['password'] ? form['password'].value : '';
+                if (!email || !password) {
+                    errorP.textContent = 'Email and password are required.';
+                    submitBtn.disabled = false;
+                    submitBtn.textContent = isLoginMode ? 'Sign in' : 'Sign up';
+                    return;
+                }
                 
                 try {
                     if (isLoginMode) {
@@ -1597,11 +1648,17 @@
                 try {
                     const userDocRef = doc(db, "users", currentUser.uid);
                     const newUsername = document.getElementById('settings-username').value;
+                    const newPassword = document.getElementById('settings-password').value;
+                    const fileInput = document.getElementById('profile-pic-upload');
+                    const file = fileInput.files[0];
+                    let passwordTried = false;
+                    // Only update username if changed
                     if (newUsername !== currentUserData.username) {
                         await updateDoc(userDocRef, { username: newUsername });
                     }
-                    const newPassword = document.getElementById('settings-password').value;
+                    // Only update password if a new password is entered
                     if (newPassword) {
+                        passwordTried = true;
                         try {
                             await updatePassword(currentUser, newPassword);
                         } catch (error) {
@@ -1614,9 +1671,7 @@
                             }
                         }
                     }
-                    const fileInput = document.getElementById('profile-pic-upload');
-                    const file = fileInput.files[0];
-                    console.log('Selected file:', file);
+                    // Only handle profile picture upload if a file is selected
                     if (file) {
                         // Validate file type and size
                         if (!file.type.startsWith('image/') || file.size > 2 * 1024 * 1024) {
@@ -1669,7 +1724,6 @@
                                 console.error('Error propagating profilePictureUrl:', err);
                             }
                             const cacheBustedUrl = imageUrl + '?t=' + Date.now();
-                            // Update all matching profile pic elements
                             document.querySelectorAll('#user-profile-pic, #settings-profile-pic-preview, #chat-contact-pic').forEach(el => {
                                 el.src = cacheBustedUrl;
                             });
@@ -1680,8 +1734,13 @@
                             return false;
                         }
                     }
+                    // If no password was attempted, never show password-related errors
                     return true; // Success
                 } catch (error) {
+                    if (error.code === 'auth/requires-recent-login' && !passwordTried) {
+                        // Ignore this error if not trying to change password
+                        return false;
+                    }
                     errorP.textContent = error.message || "Update failed. This could be a network issue. Please try again.";
                     console.error("Settings update error:", error);
                     return false; // Failure
